@@ -98595,6 +98595,7 @@ function NeverZen.new(config)
 	local animeImageLabel = nil;
 	local animeDragging = false;
 	local animeAnimationAssets = nil;
+	local animeAnimationLabels = {};
 	local animeAnimationConnection = nil;
 	local animeFrameIndex = 1;
 	local animeFrameAccumulator = 0;
@@ -98721,7 +98722,11 @@ function NeverZen.new(config)
 		if animeImageLabel then position = clampAnimeImagePosition(position) end
 		animeImageBasePosition = position
 		WindowSignal.AnimeImagePosition = position
-		if animeImageLabel and not animeDragging then animeImageLabel.Position = position end
+		if animeImageLabel and not animeDragging then
+			for _, frameLabel in ipairs(animeAnimationLabels) do
+				if frameLabel and frameLabel.Parent then frameLabel.Position = position end
+			end
+		end
 		return true
 	end
 
@@ -98731,9 +98736,13 @@ function NeverZen.new(config)
 		animeImageSize = UDim2.fromOffset(math.floor(value * AnimeImageAspectRatio + 0.5), value)
 		WindowSignal.AnimeImageHeight = value
 		if animeImageLabel then
-			animeImageLabel.Size = animeImageSize
+			for _, frameLabel in ipairs(animeAnimationLabels) do
+				if frameLabel and frameLabel.Parent then frameLabel.Size = animeImageSize end
+			end
 			animeImageBasePosition = clampAnimeImagePosition(animeImageBasePosition)
-			animeImageLabel.Position = animeImageBasePosition
+			for _, frameLabel in ipairs(animeAnimationLabels) do
+				if frameLabel and frameLabel.Parent then frameLabel.Position = animeImageBasePosition end
+			end
 			WindowSignal.AnimeImagePosition = animeImageBasePosition
 		end
 		if not skipSwitchSync and setAnimeSizeSlider then pcall(setAnimeSizeSlider, value) end
@@ -98743,7 +98752,9 @@ function NeverZen.new(config)
 	local function setAnimeImageDraggable(value, skipSwitchSync)
 		animeImageDraggable = value and true or false
 		WindowSignal.AnimeImageDraggable = animeImageDraggable
-		if animeImageLabel then animeImageLabel.Active = animeImageDraggable end
+		for _, frameLabel in ipairs(animeAnimationLabels) do
+			if frameLabel and frameLabel.Parent then frameLabel.Active = animeImageDraggable end
+		end
 		if not skipSwitchSync and setAnimeDraggableSwitch then pcall(setAnimeDraggableSwitch, animeImageDraggable) end
 		return true
 	end
@@ -98756,11 +98767,20 @@ function NeverZen.new(config)
 	end
 
 	local function setAnimeAnimationFrame(index)
-		if not animeAnimationAssets or not animeImageLabel or not animeImageLabel.Parent then return false end
+		if not animeAnimationAssets or not animeAnimationLabels then return false end
 		local normalized = ((index - 1) % ANIME_OVERLAY_FRAME_COUNT) + 1
-		local asset = animeAnimationAssets[normalized]
-		if not asset then return false end
-		if animeImageLabel.Image ~= asset then animeImageLabel.Image = asset end
+		local nextLabel = animeAnimationLabels[normalized]
+		if not nextLabel or not nextLabel.Parent then return false end
+
+		local previousLabel = animeImageLabel
+		if previousLabel ~= nextLabel then
+			nextLabel.Visible = true
+			if previousLabel and previousLabel.Parent then previousLabel.Visible = false end
+			animeImageLabel = nextLabel
+		else
+			nextLabel.Visible = true
+		end
+		WindowSignal.AnimeImage = animeImageLabel
 		animeFrameIndex = normalized
 		WindowSignal.AnimeImageFrame = normalized
 		return true
@@ -98790,6 +98810,7 @@ function NeverZen.new(config)
 		local imageAssets, assetError = getAnimeOverlayAssets()
 		if not imageAssets then error(assetError or "failed to load embedded anime animation") end
 		animeAnimationAssets = imageAssets
+		animeAnimationLabels = {}
 
 		animeImageGui = UI.new("ScreenGui", {
 			Name = "Avernus_AnimeOverlay_" .. NeverZen:RandomString(),
@@ -98801,87 +98822,85 @@ function NeverZen.new(config)
 		NeverZen:SafeParent(animeImageGui)
 		NeverZen.ProtectGui(animeImageGui)
 
+		local function bindAnimeImageDrag(imageLabel)
+			bind(imageLabel.InputBegan, function(input)
+				if destroyed or not animeImageVisible or not animeImageDraggable or animeDragging then return end
+				if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
+				local startInput = input.Position
+				local startPosition = imageLabel.Position
+				animeImageLabel = imageLabel
+				WindowSignal.AnimeImage = imageLabel
+				animeDragging = true
+				addDrag({
+					update = function(position)
+						if not animeDragging or not animeImageLabel or not animeImageLabel.Parent then return end
+						local delta = position - startInput
+					local nextPosition = UDim2.new(
+						startPosition.X.Scale, startPosition.X.Offset + delta.X,
+						startPosition.Y.Scale, startPosition.Y.Offset + delta.Y
+						)
+						animeImageBasePosition = clampAnimeImagePosition(nextPosition)
+						for _, frameLabel in ipairs(animeAnimationLabels) do
+							if frameLabel and frameLabel.Parent then frameLabel.Position = animeImageBasePosition end
+						end
+						WindowSignal.AnimeImagePosition = animeImageBasePosition
+					end,
+					release = function()
+						if not animeDragging then return end
+						animeDragging = false
+						local activeLabel = animeAnimationLabels[animeFrameIndex] or imageLabel
+						if activeLabel and activeLabel.Parent then
+							animeImageBasePosition = activeLabel.Position
+							WindowSignal.AnimeImagePosition = animeImageBasePosition
+						end
+					end,
+				})
+			end)
+		end
 
-		-- Preload each full-frame PNG through a real ImageLabel before display.
-		-- This avoids both atlas-cropping bugs and blank textures during playback.
-		local preloadLabels = {}
 		for frameIndex, asset in ipairs(imageAssets) do
-			local preloadLabel = UI.new("ImageLabel", {
-				Name = "AnimeFramePreload_" .. tostring(frameIndex),
+			local imageLabel = UI.new("ImageLabel", {
+				Name = "AnimeCharacterFrame_" .. tostring(frameIndex),
 				Parent = animeImageGui,
 				BackgroundTransparency = 1,
 				BorderSizePixel = 0,
-				Size = UDim2.fromOffset(1, 1),
-				Visible = false,
+				AnchorPoint = AnimeImageOptions.AnchorPoint or Vector2.new(1, 1),
+				Position = animeImageBasePosition,
+				Size = animeImageSize,
 				Image = asset,
+				ImageTransparency = AnimeImageOptions.Transparency or 0,
+				ScaleType = Enum.ScaleType.Fit,
+				ClipsDescendants = false,
+				ZIndex = 1,
+				Active = animeImageDraggable,
+				Visible = false,
 			})
-			table.insert(preloadLabels, preloadLabel)
+			table.insert(animeAnimationLabels, imageLabel)
+			bindAnimeImageDrag(imageLabel)
 		end
 
+		-- Keep the frame ImageLabels alive after loading. Playback only switches
+		-- Visible, never swaps Image on one label, so textures cannot pop in/out.
 		local preloadFailure = nil
-		Services.ContentProvider:PreloadAsync(preloadLabels, function(contentId, status)
+		Services.ContentProvider:PreloadAsync(animeAnimationLabels, function(contentId, status)
 			if status ~= Enum.AssetFetchStatus.Success and not preloadFailure then
 				preloadFailure = tostring(contentId) .. " (" .. tostring(status) .. ")"
 			end
 		end)
-		for _, preloadLabel in ipairs(preloadLabels) do
-			pcall(function() preloadLabel:Destroy() end)
-		end
 		if preloadFailure then
-			error("could not preload all animation sheets: " .. preloadFailure)
+			error("could not preload all animation frames: " .. preloadFailure)
 		end
 
-		animeImageLabel = UI.new("ImageLabel", {
-			Name = "AnimeCharacter",
-			Parent = animeImageGui,
-			BackgroundTransparency = 1,
-			BorderSizePixel = 0,
-			AnchorPoint = AnimeImageOptions.AnchorPoint or Vector2.new(1, 1),
-			Position = animeImageBasePosition,
-			Size = animeImageSize,
-			Image = imageAssets[1],
-			ImageTransparency = AnimeImageOptions.Transparency or 0,
-			ScaleType = Enum.ScaleType.Fit,
-			ClipsDescendants = false,
-			ZIndex = 1,
-			Active = animeImageDraggable,
-		})
+		animeImageLabel = animeAnimationLabels[1]
+		if not animeImageLabel then error("no animation frames were loaded") end
 		animeImageBasePosition = clampAnimeImagePosition(animeImageBasePosition)
-		animeImageLabel.Position = animeImageBasePosition
+		for _, frameLabel in ipairs(animeAnimationLabels) do
+			frameLabel.Position = animeImageBasePosition
+		end
 		WindowSignal.AnimeImage = animeImageLabel
 		animeFrameIndex = 1
 		animeFrameAccumulator = 0
 		setAnimeAnimationFrame(1)
-
-		bind(animeImageLabel.InputBegan, function(input)
-			if destroyed or not animeImageVisible or not animeImageDraggable or animeDragging then return end
-			if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
-			local startInput = input.Position
-			local startPosition = animeImageLabel.Position
-			animeImageBasePosition = startPosition
-			animeDragging = true
-			addDrag({
-				update = function(position)
-					if not animeDragging or not animeImageLabel or not animeImageLabel.Parent then return end
-					local delta = position - startInput
-					local nextPosition = UDim2.new(
-						startPosition.X.Scale, startPosition.X.Offset + delta.X,
-						startPosition.Y.Scale, startPosition.Y.Offset + delta.Y
-					)
-					animeImageBasePosition = clampAnimeImagePosition(nextPosition)
-					animeImageLabel.Position = animeImageBasePosition
-					WindowSignal.AnimeImagePosition = animeImageBasePosition
-				end,
-				release = function()
-					if not animeDragging then return end
-					animeDragging = false
-					if animeImageLabel and animeImageLabel.Parent then
-						animeImageBasePosition = animeImageLabel.Position
-						WindowSignal.AnimeImagePosition = animeImageBasePosition
-					end
-				end,
-			})
-		end)
 	end
 
 	local function setAnimeImageVisible(value, skipSwitchSync)
@@ -98894,6 +98913,9 @@ function NeverZen.new(config)
 					if animeImageGui then pcall(function() animeImageGui:Destroy() end) end
 					animeImageGui = nil
 					animeImageLabel = nil
+					animeAnimationLabels = {}
+					animeAnimationAssets = nil
+					WindowSignal.AnimeImage = nil
 					warn("[AvernusLib] Could not show the embedded anime image: " .. tostring(err))
 					return false
 				end
@@ -105781,6 +105803,7 @@ function NeverZen.new(config)
 		stopAnimeImageAnimation()
 		animeDragging = false
 		animeAnimationAssets = nil
+		animeAnimationLabels = {}
 		if animeImageGui then
 			pcall(function() animeImageGui:Destroy() end)
 			animeImageGui = nil
